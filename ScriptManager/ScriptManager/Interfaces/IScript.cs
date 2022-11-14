@@ -16,10 +16,27 @@ namespace ScriptManager.Interfaces
         public IEnumerable<Script> SubScripts { get; set; } = Enumerable.Empty<Script>();
         public virtual void Run()
         {
-            Console.Clear();
+            //Console.Clear();
+
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine("Running default (IScript) implementation of Run() - Override if needed");
             Console.ResetColor();
+        }
+
+        public void RunAll()
+        {
+            Console.Clear();
+            Console.WriteLine($"Running all subscripts: {SubScripts.Count()}");
+            foreach (var script in SubScripts)
+            {
+                script.Instance?.Run();
+            }
+        }
+
+        public bool AddSubScript(Type subScriptType, params object[] args)
+        {
+            throw new NotImplementedException();
+            return true;
         }
 
         public bool AddSubScript(IScript subScript)
@@ -46,6 +63,19 @@ namespace ScriptManager.Interfaces
                 };
 
                 SubScripts = SubScripts.Append(script);
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        public bool AddSubScript(Script subScript)
+        {
+            try
+            {
+                SubScripts = SubScripts.Append(subScript);
                 return true;
             }
             catch (Exception)

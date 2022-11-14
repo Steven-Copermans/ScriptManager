@@ -1,13 +1,16 @@
-﻿using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using ScriptManager.Extensions;
 using ScriptManager.Services;
 
 IHostBuilder hostBuilder = Host.CreateDefaultBuilder(args)
+    .ConfigureAppConfiguration(configurationBuilder =>
+    {
+        //configurationBuilder.AddJsonFile("appsettings.json");
+    })
     .ConfigureServices((hostContext, services) =>
     {
-        Manager.SetProgramName("ScriptManager", hostContext.Configuration);
-
         services.AddHostedService<Manager>();
 
         services.AddScripts();

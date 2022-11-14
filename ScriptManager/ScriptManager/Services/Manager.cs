@@ -4,7 +4,9 @@ using Microsoft.Extensions.Hosting;
 using ScriptManager.Attributes;
 using ScriptManager.Extensions;
 using ScriptManager.Interfaces;
+using ScriptManager.Models;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using Script = ScriptManager.Models.Script;
 
 namespace ScriptManager.Services
@@ -14,226 +16,239 @@ namespace ScriptManager.Services
         private readonly IHostApplicationLifetime _lifetime;
         private readonly IServiceProvider _services;
 
-        private static IEnumerable<Script>? scripts;
-        public Manager(IHostApplicationLifetime lifetime, IServiceProvider services)
+        private static string _name { get; set; } = "ScriptManager";
+        private static string? _version { get; set; } = "1.0";
+        public static string Title { get => $"{_name}{(_version != null ? $" {_version}" : "")}"; }
+
+        private static IEnumerable<Script>? _scripts;
+        public Manager(IHostApplicationLifetime lifetime, IServiceProvider services, IConfiguration configuration)
         {
             _lifetime = lifetime;
             _services = services;
+
+            _version = (string)configuration.GetValue<object>("ScriptManager:version") ?? _version;
+            _name = (string)configuration.GetValue<object>("ScriptManager:title") ?? _name;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            if (scripts == null)
+            if (_scripts == null)
             {
                 throw new Exception("Failed to fetch scripts - Did you run Manager.RegisterScripts(IServiceCollection services) ?");
             }
 
-            bool shouldExit = false;
-            while (!stoppingToken.IsCancellationRequested && !shouldExit)
+            bool showMenu = true;
+            while (!stoppingToken.IsCancellationRequested && showMenu)
             {
-                Console.Clear();
-                Console.WriteLine(string.Format("{0," + ((Console.WindowWidth / 2) + (ProgramTitle.Length / 2)) + "}", ProgramTitle));
-                foreach(var (script, index) in scripts.WithIndex())
-                {
-                    Console.WriteLine($"[{index}]: {script.name}");
-                }
-
-                Console.WriteLine();
-                Console.WriteLine("[A]: Run All");
-                Console.WriteLine("[X]: Exit");
-
-                Console.WriteLine();
-                Console.Write("Select your option: ");
-
-                string? input = Console.ReadLine();
-
-                if (input == null)
-                {
-                    continue;
-                }
-
-                if (input.ToLower() == "x")
-                {
-                    shouldExit = true;
-                }
-
-                if (int.TryParse(input, out int id))
-                {
-                    Script? selectedScript = scripts.ElementAtOrDefault(id);
-                    if (selectedScript == null)
-                    {
-                        continue;
-                    }
-
-                    IScript? scriptService = (IScript?)_services.GetService(selectedScript.type);
-
-                    if (scriptService == null && selectedScript.Instance == null)
-                    {
-                        //TODO: Log service not found
-                        continue;
-                    }
-
-                    if (scriptService != null)
-                    {
-                        selectedScript.subScripts.AddRange(scriptService.SubScripts);
-                        selectedScript.subScripts = selectedScript.subScripts.Distinct().ToList();
-                    }
-
-                    if (selectedScript.subScripts.Any())
-                    {
-                        DrawMenu(selectedScript);
-                    } else
-                    {
-                        Console.Clear();
-                        if (scriptService != null)
-                        {
-                            scriptService.Run();
-                        } else if (selectedScript.Instance != null)
-                        {
-                            selectedScript.Instance.Run();
-                        }
-                        
-                        Console.ReadLine();
-                    }
-                }
+                showMenu = ShowMenu(stoppingToken);
             }
             Console.WriteLine("Worker: ExecuteAsync is terminating...");
             _lifetime.StopApplication();
         }
 
-        public bool DrawMenu(Script? script)
+        private bool ShowMenu(CancellationToken stoppingToken, Script? item = null)
         {
-            Console.Clear();
-            Console.WriteLine(string.Format("{0," + ((Console.WindowWidth / 2) + ((script?.name?.Length ?? ProgramTitle.Length) / 2)) + "}", script?.name ?? ProgramTitle));
+            bool showMenu = true;
+            IEnumerable<Script> scripts = item?.subScripts ?? _scripts ?? throw new Exception($"Could not load any scripts for {item?.name ?? "base menu."}");
 
-            
-            foreach (var (scr, index) in script?.subScripts.WithIndex() ?? scripts?.WithIndex() ?? Enumerable.Empty<Script>().WithIndex())
+            IScript? scriptService = null;
+            if (item != null)
             {
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.Write($"[{index}]");
-                Console.ResetColor();
+                scriptService = GetScriptService(item);
 
-                if (scr.name == null)
+                item.subScripts.AddRange(scriptService.SubScripts);
+                item.subScripts = item.subScripts.Distinct().ToList();
+
+                if (item.subScripts.Any())
                 {
-                    Console.ForegroundColor = ConsoleColor.Red;
+                    int count = item.subScripts.Max(x => x.index ?? -1) + 1;
+                    item.subScripts = item.subScripts.OrderBy(x => x.name).Select(x =>
+                    {
+                        if (x.index == null || x.index == -1)
+                        {
+                            x.index = count;
+                            ++count;
+                        }
+                        return x;
+                    }).OrderBy(x => x.index).ToList();
                 }
-                Console.WriteLine($": {scr.name ?? "No name defined for script"}");
 
-                Console.ResetColor();
+                scripts = item.subScripts;
+            }
+            Console.Clear();
+
+            if (!scripts.Any())
+            {
+                scriptService?.Run();
+                Console.ReadLine();
+                return false;
             }
 
+            // Print header
+            Console.WriteLine(string.Format("{0," + ((Console.WindowWidth / 2) + ((item?.name?.Length ?? Title.Length) / 2)) + "}", item?.name ?? Title));
+
+            foreach (Script script in scripts)
+            {
+                PrintMenuItem(script);
+            }
+
+            PrintMenuOptions(item);
+            var selectedOption = SelectMenuOption(item);
+
+            if (selectedOption.script != null)
+            {
+                if (selectedOption.script == item)
+                {
+                    foreach (var scr in item.subScripts)
+                    {
+                        var scrService = GetScriptService(scr);
+                        scr.Instance = scrService;
+
+                        scriptService?.AddSubScript(scr);
+                    }
+
+                    scriptService.SubScripts = scriptService?.SubScripts.Distinct();
+
+                    scriptService?.RunAll();
+                    Console.ReadLine();
+                    return false;
+                }
+
+                // DO THINGS WITH SCRIPT
+                while (!stoppingToken.IsCancellationRequested && showMenu)
+                {
+                    showMenu = ShowMenu(stoppingToken, selectedOption.script);
+                }
+            }
+
+            return !selectedOption.shouldExit;
+        }
+
+        private IScript GetScriptService(Script item)
+        {
+            IScript? scriptService = (IScript?)_services.GetService(item.type);
+
+            if (scriptService == null && item.Instance == null)
+            {
+                //TODO: Log service not found
+                throw new Exception("Service not found");
+            }
+
+            return scriptService ?? item.Instance!;
+        }
+
+        private static void PrintMenuOptions(Script? item)
+        {
             Console.WriteLine();
             Console.WriteLine("[A]: Run All");
-            Console.WriteLine("[B]: Back");
+
+            if (item == null)
+            {
+                Console.WriteLine("[X]: Exit");
+            } else
+            {
+                Console.WriteLine("[B]: Back");
+            }
 
             Console.WriteLine();
             Console.Write("Select your option: ");
+        }
 
-            string? input = Console.ReadLine();
+        private static (Script? script, bool shouldExit) SelectMenuOption(Script? item)
+        {
+            string? input = Console.ReadLine()?.ToLower();
 
             if (input == null)
             {
-                return DrawMenu(script);
+                return (null, false);
             }
 
-            if (input.ToLower() == "b")
+            switch (input)
             {
-                return true;
-            }
-
-            if (int.TryParse(input, out int id))
-            {
-                Script? selectedScript = script?.subScripts.ElementAtOrDefault(id);
-                if (selectedScript == null)
-                {
-                    return DrawMenu(script);
-                }
-
-                IScript? scriptService = (IScript?)_services.GetService(selectedScript.type);
-
-                if (scriptService == null && selectedScript.Instance == null)
-                {
-                    //TODO: Log service not found
-                    return DrawMenu(script);
-                }
-
-                if (scriptService != null)
-                {
-                    selectedScript.subScripts.AddRange(scriptService.SubScripts);
-                    selectedScript.subScripts = selectedScript.subScripts.Distinct().ToList();
-                }
-
-                if (selectedScript.subScripts.Any())
-                {
-                    DrawMenu(selectedScript);
-                }
-                else
-                {
-                    Console.Clear();
-                    if (scriptService != null)
+                case "b":
+                    return (null, item != null);
+                case "x":
+                    return (null, item == null);
+                case "a":
+                    return (item, false);
+                default:
+                    if (int.TryParse(input, out int index))
                     {
-                        scriptService.Run();
+                        IEnumerable<Script> scripts = item?.subScripts ?? _scripts ?? throw new Exception($"Could not load any scripts for {item?.name ?? "base menu."}");
+                        return (scripts?.FirstOrDefault(x => x.index == index), false);
                     }
-                    else if (selectedScript.Instance != null)
-                    {
-                        selectedScript.Instance.Run();
-                    }
-                    Console.ReadLine();
-                }
-
-                return true;
-            } else
-            {
-                return DrawMenu(script);
+                    return (null, false);
             }
         }
 
-        public override Task StartAsync(CancellationToken cancellationToken)
+        private static void PrintMenuItem(Script menuItem)
         {
-            Console.WriteLine("Worker: StartAsync called...");
-            return base.StartAsync(cancellationToken);
-        }
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.Write($"[{menuItem.index.ToString() ?? "UNDEFINED"}]");
 
-        public override async Task StopAsync(CancellationToken cancellationToken)
-        {
-            Console.WriteLine("Worker: StopAsync called...");
-            await base.StopAsync(cancellationToken);
-        }
+            Console.ResetColor();
+            Console.Write(":");
 
-        public override void Dispose()
-        {
-            Console.WriteLine("Worker: Dispose called...");
-            base.Dispose();
+            if (menuItem.name != null)
+            {
+                Console.WriteLine($" {menuItem.name}");
+            }
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($" UNDEFINED");
+            }
         }
 
         public static IEnumerable<Script>? GetScriptItems()
         {
-            return scripts;
+            return _scripts;
         }
 
         public static IEnumerable<Script> RegisterScripts(IServiceCollection services)
         {
-            List<Type> scriptItemTypes = Assembly.GetEntryAssembly()?.GetTypes().Where(t => !t.IsAbstract && t.BaseType == typeof(IScript)).ToList() ?? new();
+            Type baseType = typeof(IScript);
+            // Get all child types of IScript
+            // = NOT abstract
+            // = BaseType IScript
+            // = NOT an interface
+            List<Type> scriptItemTypes = Assembly.GetEntryAssembly()?.GetTypes().Where(t => !t.IsAbstract && t.BaseType == baseType && !t.IsInterface).ToList() ?? new();
 
             List<Script> scriptItems = new();
-
-            Console.Clear();
             foreach (Type type in scriptItemTypes)
             {
+                // Add as scoped service
                 services.AddScoped(type);
                 scriptItems.Add(GetScript(type, ref services));
             }
 
-            scriptItems = scriptItems.OrderBy(x => x.index ?? int.MaxValue).ThenBy(x => x.name).ToList();
+            int count = scriptItems.Max(x => x.index ?? -1) + 1;
+            scriptItems = scriptItems.OrderBy(x => x.name).Select(x =>
+            {
+                if (x.index == null || x.index == -1)
+                {
+                    x.index = count;
+                    ++count;
+                }
+                return x;
+            }).OrderBy(x => x.index).ToList();
 
-            scripts = scriptItems;
+            _scripts = scriptItems;
             return scriptItems;
         }
 
         private static Script GetScript(Type type, ref IServiceCollection serviceCollection)
         {
+            Console.WriteLine("Type: " + type.FullName);
+
+
             IServiceProvider serviceProvider = serviceCollection.BuildServiceProvider();
+            // Get all child types of the given type 'type'
+            // = NOT abstract
+            // = BaseType with generic type argument of the give type 'type'
             List<Type> subScriptTypes = Assembly.GetEntryAssembly()?.GetTypes().Where(t => !t.IsAbstract && t.BaseType?.GenericTypeArguments.FirstOrDefault(y => y == type) != null).ToList() ?? new();
+
+            //var testTypes = Assembly.GetEntryAssembly()?.GetTypes().Where(x => x.);
 
             List<Script> subScripts = new();
             foreach (Type subScriptType in subScriptTypes)
@@ -252,21 +267,34 @@ namespace ScriptManager.Services
                     hasPublicDIConstructor |= isDIConstructor;
                 }
 
+                // Type can be constructed with a parameterless constructor OR can be constructed using DI
                 if ((subScriptType.GetConstructor(Type.EmptyTypes) != null || hasPublicDIConstructor) && !subScriptType.IsAbstract )
                 {
-                    Console.WriteLine($"{subScriptType.Name} - Can be constructed with DI or Parameterless");
+                    // Add type as scoped service
                     serviceCollection.AddScoped(subScriptType);
                     subScripts.Add(GetScript(subScriptType, ref serviceCollection));
                 }                
             }
 
-            bool hasScriptAttribute = Attribute.IsDefined(type, typeof(ScriptAttribute));
+            if (subScripts.Any())
+            {
+                int count = subScripts.Max(x => x.index ?? -1) + 1;
+                subScripts = subScripts.OrderBy(x => x.name).Select(x =>
+                {
+                    if (x.index == null || x.index == -1)
+                    {
+                        x.index = count;
+                        ++count;
+                    }
+                    return x;
+                }).OrderBy(x => x.index).ToList();
+            }
 
             int? index = null;
             string name = type.Name;
             string? description = null;
 
-            if (hasScriptAttribute)
+            if (Attribute.IsDefined(type, typeof(ScriptAttribute)))
             {
                 ScriptAttribute attribute = (ScriptAttribute)type.GetCustomAttribute(typeof(ScriptAttribute), false)!;
 
@@ -283,34 +311,6 @@ namespace ScriptManager.Services
                 subScripts = subScripts,
                 type = type
             };
-        }
-        private static string _name { get; set; } = "ScriptManager";
-        private static string? _version { get; set; }
-        public static string ProgramTitle { get => $"{_name}{(_version != null ? $" v_{_version}" : "")}"; }
-        public static string ProgramName { get => _name; }
-        public static string? ProgramVersion { get => _version; }
-
-        public static string SetProgramName(string name, IConfiguration configuration)
-        {
-            _name = name;
-            _version = (string)configuration.GetValue<object>("version");
-
-            return $"{_name} v_{_version}";
-        }
-
-        public static string SetProgramName(string name, string version)
-        {
-            _name = name;
-            _version = version;
-
-            return $"{_name} v_{_version}";
-        }
-
-        public static string SetProgramName(string name)
-        {
-            _name = name;
-
-            return $"{_name}";
         }
     }
 }

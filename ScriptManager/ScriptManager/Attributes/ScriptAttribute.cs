@@ -6,11 +6,6 @@
         public string? name;
         public string? description;
         public int index = -1;
-        public double version;
-
-        public ScriptAttribute()
-        {
-            version = 1.0;
-        }
+        public double version = 1.0;
     }
 }
